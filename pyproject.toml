@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "msp-link"
+version = "0.1.0"
+description = "Independent MSP v1/v2 TCP and serial client"
+requires-python = ">=3.12"
+dependencies = ["pyserial>=3.5,<4"]
+
+[dependency-groups]
+dev = ["pytest>=9,<10"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
