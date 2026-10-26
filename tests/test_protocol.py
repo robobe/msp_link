@@ -138,3 +138,21 @@ def test_serial_transport_uses_a_real_pseudo_terminal():
         transport.close()
         os.close(master)
         os.close(slave)
+
+
+def test_request_metrics_count_responses_before_snapshot_sampling():
+    client = Client(LoopbackTransport()).start()
+    try:
+        assert client.connected.wait(.2)
+        for _ in range(3):
+            client.request(108)
+        client.request(109)
+        now = time.monotonic()
+        metrics = client.request_metrics(108, now)
+        assert metrics['requests_hz'] == metrics['responses_hz'] == 3
+        assert metrics['queue_delay_mean_s'] >= 0
+        assert metrics['response_turnaround_mean_s'] >= 0
+        assert client.request_metrics(108, now) == metrics
+        assert client.request_metrics(108, now + 2)['responses_hz'] == 0
+    finally:
+        client.close()

@@ -28,3 +28,9 @@ The library deliberately has no arming, command-age, mission or physics policy.
 For hardware use `SerialTransport(device, baudrate)`. Typed measurements preserve
 Betaflight's native axes and include the host monotonic receipt time because MSP
 responses do not carry sensor timestamps.
+
+`client.request_metrics(command, now_s)` returns request-send and successful-response
+counts per trailing second, plus mean/maximum queue and response-turnaround delays.
+It counts transport events independently of snapshot frequency and resets on
+reconnect. `now_s` uses the host monotonic clock; empty timing windows report null
+delays. These response rates do not measure the firmware estimator update rate.

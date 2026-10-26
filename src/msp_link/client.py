@@ -1,8 +1,9 @@
 """Single transport owner, bounded requests and independent latest-RC streaming."""
 from concurrent.futures import Future
+from collections import deque
 from dataclasses import replace
 from queue import Queue, Empty, Full
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 import time
 
 from .protocol import Parser, encode
@@ -27,6 +28,8 @@ class Client:
         self.connected = Event()
         self.generation = 0
         self.error = None
+        self.timing_lock = Lock()
+        self.timings = deque(maxlen=2048)
 
     def start(self):
         if self.thread is not None:
@@ -43,7 +46,8 @@ class Client:
             raise MspError('MSP is not connected')
         future = Future()
         try:
-            self.queue.put_nowait((command, packet, time.monotonic() + timeout_s, future))
+            queued_at = time.monotonic()
+            self.queue.put_nowait((command, packet, queued_at + timeout_s, future, queued_at))
         except Full as error:
             raise MspError('MSP request queue is full') from error
         try:
@@ -61,6 +65,8 @@ class Client:
                         self.transport.open()
                         self.rc.clear()
                         self.generation += 1
+                        with self.timing_lock:
+                            self.timings.clear()
                         parser = Parser()
                         self.error = None
                         self.connected.set()
@@ -82,13 +88,19 @@ class Client:
                                 pending = None
                             else:
                                 self.transport.send(pending[1])
+                                sent_at = time.monotonic()
+                                with self.timing_lock:
+                                    self.timings.append(('sent', pending[0], sent_at, sent_at - pending[4]))
                     for message in parser.feed(self.transport.receive()):
                         if pending is not None and message.direction in ('>', '!') and message.command == pending[0]:
                             if not pending[3].done():
                                 if message.direction == '!':
                                     pending[3].set_exception(MspError(f'MSP command {message.command} rejected by firmware'))
                                 else:
-                                    pending[3].set_result(replace(message, received_at=time.monotonic()))
+                                    received_at = time.monotonic()
+                                    with self.timing_lock:
+                                        self.timings.append(('response', pending[0], received_at, received_at - sent_at))
+                                    pending[3].set_result(replace(message, received_at=received_at))
                             pending = None
                     if pending is not None and time.monotonic() >= pending[2]:
                         raise TimeoutError(f'MSP command {pending[0]} timed out')
@@ -113,11 +125,24 @@ class Client:
     def _drain(self, reason):
         while True:
             try:
-                _, _, _, future = self.queue.get_nowait()
+                _, _, _, future, _ = self.queue.get_nowait()
             except Empty:
                 return
             if not future.done():
                 future.set_exception(MspError(reason))
+
+    def request_metrics(self, command, now_s):
+        """Actual transport events in the trailing second, independent of logging rate."""
+        with self.timing_lock:
+            events = [e for e in self.timings if e[1] == command and now_s - 1 < e[2] <= now_s]
+        result = {}
+        for kind, rate, delay in (('sent', 'requests_hz', 'queue_delay'),
+                                  ('response', 'responses_hz', 'response_turnaround')):
+            values = [e[3] for e in events if e[0] == kind]
+            result[rate] = len(values)
+            result[delay + '_mean_s'] = sum(values) / len(values) if values else None
+            result[delay + '_max_s'] = max(values, default=None)
+        return result
 
     def close(self):
         self.stop.set()
