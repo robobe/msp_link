@@ -106,6 +106,10 @@ def test_client_services_requests_while_repeating_rc_and_does_not_replay_after_r
         assert client.request(42).payload == b'reply'
         client.rc.update((1500, 1500, 1000, 1500))
         wait_for(lambda: sum(message.command == 200 for message in transport.sent) >= 3)
+        deliveries = client.drain_rc_deliveries()
+        assert len(deliveries) >= 3
+        assert all(delivery.channels == (1500, 1500, 1000, 1500) for delivery in deliveries)
+        assert all(delivery.generation == client.generation for delivery in deliveries)
         with transport.lock:
             transport.disconnect = True
         generation = client.generation

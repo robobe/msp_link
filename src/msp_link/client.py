@@ -1,7 +1,7 @@
 """Single transport owner, bounded requests and independent latest-RC streaming."""
 from concurrent.futures import Future
 from collections import deque
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from queue import Queue, Empty, Full
 from threading import Event, Lock, Thread
 import time
@@ -11,10 +11,20 @@ from .rc import RcStream
 
 REQUEST_CAPACITY = 32
 RECONNECT_S = .2
+# shortcut: retain about 40 seconds at 50 Hz, add overflow telemetry if runtime stalls longer.
+RC_DELIVERY_CAPACITY = 2048
 
 
 class MspError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class RcDelivery:
+    """An RC frame successfully handed to the MSP transport."""
+    sent_at_us: int
+    generation: int
+    channels: tuple[int, ...]
 
 
 class Client:
@@ -30,6 +40,8 @@ class Client:
         self.error = None
         self.timing_lock = Lock()
         self.timings = deque(maxlen=2048)
+        self.rc_delivery_lock = Lock()
+        self.rc_deliveries = deque(maxlen=RC_DELIVERY_CAPACITY)
 
     def start(self):
         if self.thread is not None:
@@ -71,11 +83,15 @@ class Client:
                         self.error = None
                         self.connected.set()
                     now = time.monotonic()
-                    payload = self.rc.due(now)
-                    if payload is not None:
+                    delivery = self.rc.due_with_channels(now)
+                    if delivery is not None:
+                        payload, channels = delivery
                         self.transport.send(encode(200, payload, version=self.version))
                         self.rc.sent += 1
-                        self.rc.last_sent_at = now
+                        sent_at_us = time.monotonic_ns() // 1000
+                        self.rc.last_sent_at = sent_at_us / 1e6
+                        with self.rc_delivery_lock:
+                            self.rc_deliveries.append(RcDelivery(sent_at_us, self.generation, channels))
                     if pending is None:
                         try:
                             pending = self.queue.get_nowait()
@@ -143,6 +159,12 @@ class Client:
             result[delay + '_mean_s'] = sum(values) / len(values) if values else None
             result[delay + '_max_s'] = max(values, default=None)
         return result
+
+    def drain_rc_deliveries(self):
+        with self.rc_delivery_lock:
+            result = tuple(self.rc_deliveries)
+            self.rc_deliveries.clear()
+            return result
 
     def close(self):
         self.stop.set()

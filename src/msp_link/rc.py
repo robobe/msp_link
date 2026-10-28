@@ -18,23 +18,31 @@ class RcStream:
         self.period = 1 / hz
         self.lock = Lock()
         self.payload = None
+        self.channels = None
         self.next_send = 0.
         self.sent = 0
         self.last_sent_at = None
 
     def update(self, channels):
-        payload = pack_rc(channels)
+        values = tuple(channels)
+        payload = pack_rc(values)
         with self.lock:
             self.payload = payload
+            self.channels = values
 
     def clear(self):
         with self.lock:
             self.payload = None
+            self.channels = None
             self.next_send = 0.
 
     def due(self, now):
+        delivery = self.due_with_channels(now)
+        return None if delivery is None else delivery[0]
+
+    def due_with_channels(self, now):
         with self.lock:
             if self.payload is None or now < self.next_send:
                 return None
             self.next_send = now + self.period
-            return self.payload
+            return self.payload, self.channels
